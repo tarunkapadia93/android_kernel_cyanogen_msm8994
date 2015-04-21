@@ -1311,7 +1311,11 @@ static int64_t twos_compliment_extend(int64_t val, int nbytes)
 #define LSB_8B		9800
 #define TEMP_LSB_16B	625
 #define DECIKELVIN	2730
+#ifdef CONFIG_MACH_PM9X
+#define SRAM_PERIOD_UPDATE_MS		10000
+#else
 #define SRAM_PERIOD_UPDATE_MS		30000
+#endif
 #define SRAM_PERIOD_NO_ID_UPDATE_MS	100
 #define FULL_PERCENT_28BIT		0xFFFFFFF
 #define FULL_PERCENT_3B			0xFFFFFF
