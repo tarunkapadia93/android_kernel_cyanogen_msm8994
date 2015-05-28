@@ -100,6 +100,11 @@ struct smbchg_chip {
 	int				target_fastchg_current_ma;
 	int				cfg_fastchg_current_ma;
 	int				fastchg_current_ma;
+#ifdef CONFIG_MACH_PM9X
+	int				cfg_vfloat_mv;
+	int				warm_fastchg_current_ma;
+	int				cool_fastchg_current_ma;
+#endif
 	int				vfloat_mv;
 	int				fastchg_current_comp;
 	int				float_voltage_comp;
@@ -1639,8 +1644,15 @@ static void smbchg_parallel_usb_disable(struct smbchg_chip *chip)
 	power_supply_set_current_limit(parallel_psy,
 				SUSPEND_CURRENT_MA * 1000);
 	power_supply_set_present(parallel_psy, false);
+#ifndef CONFIG_MACH_PM9X
 	chip->target_fastchg_current_ma = chip->cfg_fastchg_current_ma;
 	smbchg_set_fastchg_current(chip, chip->target_fastchg_current_ma);
+#else
+	if (!chip->batt_warm && !chip->batt_cool) {
+		chip->target_fastchg_current_ma = chip->cfg_fastchg_current_ma;
+		smbchg_set_fastchg_current(chip, chip->target_fastchg_current_ma);
+	}
+#endif
 	chip->usb_tl_current_ma =
 		calc_thermal_limited_current(chip, chip->usb_target_current_ma);
 	smbchg_set_usb_current_max(chip, chip->usb_tl_current_ma);
@@ -3688,6 +3700,20 @@ static irqreturn_t batt_warm_handler(int irq, void *_chip)
 	smbchg_read(chip, &reg, chip->bat_if_base + RT_STS, 1);
 	chip->batt_warm = !!(reg & HOT_BAT_SOFT_BIT);
 	pr_smb(PR_INTERRUPT, "triggered: 0x%02x\n", reg);
+#ifdef CONFIG_MACH_PM9X
+	//normal to warm
+	if (chip->batt_warm) {
+		smbchg_float_voltage_comp_set(chip, 16);// 4.09v
+		smbchg_set_fastchg_current(chip, chip->warm_fastchg_current_ma);
+		pr_smb(PR_STATUS,"normal to warm ! cv 4.1v, cc %d\n", chip->warm_fastchg_current_ma);
+	//warm to normal
+	} else {
+		//restore to default value
+		smbchg_float_voltage_set(chip, chip->cfg_vfloat_mv);
+		smbchg_set_fastchg_current(chip, chip->cfg_fastchg_current_ma);	
+		pr_smb(PR_STATUS,"warm to normal ! cv %d, cc %d\n", chip->cfg_vfloat_mv, chip->cfg_fastchg_current_ma);
+	}
+#endif
 	smbchg_parallel_usb_check_ok(chip);
 	if (chip->psy_registered)
 		power_supply_changed(&chip->batt_psy);
@@ -3704,6 +3730,20 @@ static irqreturn_t batt_cool_handler(int irq, void *_chip)
 	smbchg_read(chip, &reg, chip->bat_if_base + RT_STS, 1);
 	chip->batt_cool = !!(reg & COLD_BAT_SOFT_BIT);
 	pr_smb(PR_INTERRUPT, "triggered: 0x%02x\n", reg);
+#ifdef CONFIG_MACH_PM9X
+	//normal to cool
+	if (chip->batt_cool) {
+		smbchg_float_voltage_comp_set(chip, 0);
+		smbchg_set_fastchg_current(chip, chip->cool_fastchg_current_ma);
+		pr_smb(PR_STATUS,"normal to cool ! cv 4.4v, cc %d\n", chip->cool_fastchg_current_ma);
+	//cool to normal
+	} else {
+		//restore to default values
+		smbchg_float_voltage_set(chip, chip->cfg_vfloat_mv);
+		smbchg_set_fastchg_current(chip, chip->cfg_fastchg_current_ma);	
+		pr_smb(PR_STATUS,"cool to normal ! cv %d, cc %d\n", chip->cfg_vfloat_mv, chip->cfg_fastchg_current_ma);
+	}
+#endif
 	smbchg_parallel_usb_check_ok(chip);
 	if (chip->psy_registered)
 		power_supply_changed(&chip->batt_psy);
@@ -4412,6 +4452,7 @@ static inline int get_bpd(const char *name)
 #define AICL_WL_SEL_45S		0
 #define CHGR_CCMP_CFG			0xFA
 #define JEITA_TEMP_HARD_LIMIT_BIT	BIT(5)
+#define CCMP_CHG_I_BIT		BIT(1)| BIT(0)
 static int smbchg_hw_init(struct smbchg_chip *chip)
 {
 	int rc, i;
@@ -4642,6 +4683,11 @@ static int smbchg_hw_init(struct smbchg_chip *chip)
 			return rc;
 		}
 	}
+
+#ifdef CONFIG_MACH_PM9X
+	rc = smbchg_sec_masked_write(chip, chip->chgr_base + CHGR_CCMP_CFG,
+				CCMP_CHG_I_BIT, 0);
+#endif
 
 	/* make the buck switch faster to prevent some vbus oscillation */
 	rc = smbchg_sec_masked_write(chip,
@@ -4910,6 +4956,13 @@ static int smb_parse_dt(struct smbchg_chip *chip)
 	OF_PROP_READ(chip, chip->target_fastchg_current_ma,
 			"fastchg-current-ma", rc, 1);
 	OF_PROP_READ(chip, chip->vfloat_mv, "float-voltage-mv", rc, 1);
+#ifdef CONFIG_MACH_PM9X
+	OF_PROP_READ(chip, chip->warm_fastchg_current_ma,
+			"warm-fastchg-current-ma", rc, 1);
+	OF_PROP_READ(chip, chip->cool_fastchg_current_ma,
+			"cool-fastchg-current-ma", rc, 1);
+	chip->cfg_vfloat_mv = chip->vfloat_mv;
+#endif
 	OF_PROP_READ(chip, chip->safety_time, "charging-timeout-mins", rc, 1);
 	OF_PROP_READ(chip, chip->vled_max_uv, "vled-max-uv", rc, 1);
 	if (chip->vled_max_uv < 0)
