@@ -472,26 +472,26 @@ void msm_isp_update_framedrop_reg(struct vfe_device *vfe_dev,
 				msm_isp_cfg_framedrop_reg(vfe_dev, stream_info);
 			}
 		}
-		if (stream_info->stream_type == BURST_STREAM &&
-			(SRC_TO_INTF(stream_info->stream_src) == frame_src)) {
-			if (stream_info->runtime_framedrop_update_burst) {
-				stream_info->runtime_framedrop_update_burst = 0;
+		if (stream_info->stream_type != BURST_STREAM)
+			continue;
 
-				stream_info->runtime_burst_frame_count =
-					stream_info->runtime_init_frame_drop +
-					(stream_info->runtime_num_burst_capture
-					- 1) *
-					(stream_info->framedrop_period + 1) + 1;
-				msm_isp_cfg_framedrop_reg(vfe_dev, stream_info);
-			} else {
+		if (stream_info->runtime_framedrop_update_burst) {
+			stream_info->runtime_framedrop_update_burst = 0;
+
+			stream_info->runtime_burst_frame_count =
+				stream_info->runtime_init_frame_drop +
+				(stream_info->runtime_num_burst_capture - 1) *
+				(stream_info->framedrop_period + 1) + 1;
+			msm_isp_cfg_framedrop_reg(vfe_dev, stream_info);
+		} else {
+			if (stream_info->runtime_burst_frame_count > 0)
 				stream_info->runtime_burst_frame_count--;
-				if ((stream_info->runtime_burst_frame_count <
-					BURST_SKIP_THRESHOLD) &&
-					(stream_info->runtime_burst_frame_count
-					>= 0)) {
-					msm_isp_cfg_framedrop_reg(vfe_dev,
-						stream_info);
-				}
+
+			if ((stream_info->runtime_burst_frame_count <
+				BURST_SKIP_THRESHOLD) &&
+				(stream_info->runtime_burst_frame_count >= 0)) {
+				msm_isp_cfg_framedrop_reg(vfe_dev,
+					stream_info);
 			}
 		}
 	}
@@ -810,7 +810,11 @@ int msm_isp_release_axi_stream(struct vfe_device *vfe_dev, void *arg)
 		stream_cfg.cmd = STOP_STREAM;
 		stream_cfg.num_streams = 1;
 		stream_cfg.stream_handle[0] = stream_release_cmd->stream_handle;
-		msm_isp_cfg_axi_stream(vfe_dev, (void *) &stream_cfg);
+		rc = msm_isp_cfg_axi_stream(vfe_dev, (void *) &stream_cfg);
+		if (rc < 0) {
+			pr_err("%s: msm_isp_cfg_axi_stream failed: %d\n", __func__, rc);
+			return rc;
+		}
 	}
 
 	for (i = 0; i < stream_info->num_planes; i++) {
@@ -997,22 +1001,6 @@ void msm_isp_axi_cfg_update(struct vfe_device *vfe_dev,
 			&axi_data->axi_cfg_update[frame_src]);
 }
 
-static int msm_isp_cfg_pong_address(struct vfe_device *vfe_dev,
-		struct msm_vfe_axi_stream *stream_info)
-{
-	int i, rc = -1;
-	struct msm_isp_buffer *buf = stream_info->buf[0];
-	if (!buf)
-		return rc;
-	for (i = 0; i < stream_info->num_planes; i++)
-		vfe_dev->hw_info->vfe_ops.axi_ops.update_ping_pong_addr(
-			vfe_dev, stream_info->wm[i],
-			VFE_PONG_FLAG, buf->mapped_info[i].paddr +
-			stream_info->plane_cfg[i].plane_addr_offset);
-	stream_info->buf[1] = buf;
-	return 0;
-}
-
 static void msm_isp_get_done_buf(struct vfe_device *vfe_dev,
 	struct msm_vfe_axi_stream *stream_info, uint32_t pingpong_status,
 	struct msm_isp_buffer **done_buf)
@@ -1077,7 +1065,8 @@ int msm_isp_print_ping_pong_address(struct vfe_device *vfe_dev)
 }
 
 static int msm_isp_cfg_ping_pong_address(struct vfe_device *vfe_dev,
-	struct msm_vfe_axi_stream *stream_info, uint32_t pingpong_status)
+	struct msm_vfe_axi_stream *stream_info, uint32_t pingpong_status,
+	uint8_t valid_address)
 {
 	int i, rc = -1;
 	struct msm_isp_buffer *buf = NULL;
@@ -1085,6 +1074,7 @@ static int msm_isp_cfg_ping_pong_address(struct vfe_device *vfe_dev,
 	struct msm_vfe_frame_request_queue *queue_req;
 	uint32_t pingpong_bit;
 	uint32_t stream_idx = HANDLE_TO_IDX(stream_info->stream_handle);
+	dma_addr_t paddr;
 
 	if (stream_idx >= MAX_NUM_STREAM) {
 		pr_err("%s: Invalid stream_idx", __func__);
@@ -1099,39 +1089,48 @@ static int msm_isp_cfg_ping_pong_address(struct vfe_device *vfe_dev,
 		if (!queue_req)
 			return 0;
 
-		queue_req->cmd_used = 0;
 		bufq_handle = stream_info->
 			bufq_handle[queue_req->buff_queue_id];
-		list_del(&queue_req->list);
-		stream_info->request_q_cnt--;
 
-		if (!bufq_handle) {
+		if (!bufq_handle || stream_info->request_q_cnt <= 0) {
 			pr_err("%s: Drop request. Shared stream is stopped.\n",
 				__func__);
 			return -EINVAL;
 		}
+		queue_req->cmd_used = 0;
+		list_del(&queue_req->list);
+		stream_info->request_q_cnt--;
 	}
 
-	rc = vfe_dev->buf_mgr->ops->get_buf(vfe_dev->buf_mgr,
+	if (valid_address == 1) {
+		rc = vfe_dev->buf_mgr->ops->get_buf(vfe_dev->buf_mgr,
 			vfe_dev->pdev->id, bufq_handle, &buf);
 
-	if (rc < 0) {
-		vfe_dev->error_info.stream_framedrop_count[stream_idx]++;
-		vfe_dev->error_info.framedrop_flag = 1;
-		return rc;
+		if (rc < 0) {
+			vfe_dev->error_info.
+				stream_framedrop_count[stream_idx]++;
+			vfe_dev->error_info.framedrop_flag = 1;
+			return rc;
+		}
+
+		if (buf->num_planes != stream_info->num_planes) {
+			pr_err("%s: Invalid buffer\n", __func__);
+			rc = -EINVAL;
+			goto buf_error;
+		}
 	}
 
-	if (buf->num_planes != stream_info->num_planes) {
-		pr_err("%s: Invalid buffer\n", __func__);
-		rc = -EINVAL;
-		goto buf_error;
-	}
+	for (i = 0; i < stream_info->num_planes; i++) {
+		if (valid_address == 1)
+			paddr = buf->mapped_info[i].paddr +
+				stream_info->plane_cfg[i].plane_addr_offset;
+		else
+			paddr = 0xDEADBEEF;
 
-	for (i = 0; i < stream_info->num_planes; i++)
 		vfe_dev->hw_info->vfe_ops.axi_ops.update_ping_pong_addr(
 			vfe_dev, stream_info->wm[i],
-			pingpong_status, buf->mapped_info[i].paddr +
-			stream_info->plane_cfg[i].plane_addr_offset);
+			pingpong_status, paddr);
+	}
 
 	pingpong_bit = (~(pingpong_status >> stream_info->wm[0]) & 0x1);
 	stream_info->buf[pingpong_bit] = buf;
@@ -1242,6 +1241,7 @@ static void msm_isp_process_done_buf(struct vfe_device *vfe_dev,
 
 			halt_cmd.overflow_detected = 1;
 			halt_cmd.stop_camif = 1;
+			halt_cmd.blocking_halt = 0;
 
 			msm_isp_axi_halt(vfe_dev, &halt_cmd);
 			error_event.frame_id =
@@ -1475,9 +1475,11 @@ static int msm_isp_init_stream_ping_pong_reg(
 	struct msm_vfe_axi_stream *stream_info)
 {
 	int rc = 0;
+	uint8_t valid_address;
+
 	/*Set address for both PING & PONG register */
 	rc = msm_isp_cfg_ping_pong_address(vfe_dev,
-		stream_info, VFE_PING_FLAG);
+		stream_info, VFE_PING_FLAG, 1);
 	if (rc < 0) {
 		pr_err("%s: No free buffer for ping\n",
 			   __func__);
@@ -1490,21 +1492,18 @@ static int msm_isp_init_stream_ping_pong_reg(
 	 */
 	if (stream_info->stream_type == BURST_STREAM &&
 		stream_info->runtime_num_burst_capture <= 1) {
-		rc = msm_isp_cfg_pong_address(vfe_dev, stream_info);
-		if (rc < 0) {
-			pr_err("%s: No free buffer for pong\n",
-				   __func__);
-			return rc;
-		}
-	} else {
-		rc = msm_isp_cfg_ping_pong_address(vfe_dev,
-			stream_info, VFE_PONG_FLAG);
-		if (rc < 0) {
-			pr_err("%s: No free buffer for pong\n",
-				   __func__);
-			return rc;
-		}
+		valid_address = 0;
+	} else
+		valid_address = 1;
+
+	rc = msm_isp_cfg_ping_pong_address(vfe_dev,
+		stream_info, VFE_PONG_FLAG, valid_address);
+	if (rc < 0) {
+		pr_err("%s: No free buffer for pong\n",
+			__func__);
+		return rc;
 	}
+
 	return rc;
 }
 
@@ -1548,7 +1547,8 @@ int msm_isp_axi_halt(struct vfe_device *vfe_dev,
 			OVERFLOW_DETECTED);
 	}
 
-	rc = vfe_dev->hw_info->vfe_ops.axi_ops.halt(vfe_dev, 1);
+	rc = vfe_dev->hw_info->vfe_ops.axi_ops.halt(vfe_dev,
+		halt_cmd->blocking_halt);
 
 	if (halt_cmd->stop_camif) {
 		vfe_dev->hw_info->vfe_ops.core_ops.
@@ -1697,6 +1697,12 @@ static int msm_isp_start_axi_stream(struct vfe_device *vfe_dev,
 	if (stream_cfg_cmd->num_streams > MAX_NUM_STREAM)
 		return -EINVAL;
 
+	if (camif_update == ENABLE_CAMIF) {
+		atomic_set(&vfe_dev->error_info.overflow_state,
+				NO_OVERFLOW);
+		vfe_dev->axi_data.src_info[VFE_PIX_0].frame_id = 0;
+	}
+
 	for (i = 0; i < stream_cfg_cmd->num_streams; i++) {
 		if (HANDLE_TO_IDX(stream_cfg_cmd->stream_handle[i]) >=
 			MAX_NUM_STREAM) {
@@ -1749,9 +1755,6 @@ static int msm_isp_start_axi_stream(struct vfe_device *vfe_dev,
 	msm_isp_update_camif_output_count(vfe_dev, stream_cfg_cmd);
 
 	if (camif_update == ENABLE_CAMIF) {
-		atomic_set(&vfe_dev->error_info.overflow_state,
-				NO_OVERFLOW);
-		vfe_dev->axi_data.src_info[VFE_PIX_0].frame_id = 0;
 		vfe_dev->hw_info->vfe_ops.core_ops.
 			update_camif_state(vfe_dev, camif_update);
 	}
@@ -1776,7 +1779,7 @@ static int msm_isp_stop_axi_stream(struct vfe_device *vfe_dev,
 	struct msm_vfe_axi_shared_data *axi_data = &vfe_dev->axi_data;
 	int ext_read =
 		(axi_data->src_info[VFE_PIX_0].input_mux == EXTERNAL_READ);
-	uint32_t src_mask = 0;
+	uint32_t src_mask = 0, intf;
 
 	if (stream_cfg_cmd->num_streams > MAX_NUM_STREAM ||
 		stream_cfg_cmd->num_streams == 0)
@@ -1819,13 +1822,17 @@ static int msm_isp_stop_axi_stream(struct vfe_device *vfe_dev,
 				(!ext_read))
 				wait_for_complete_for_this_stream = 1;
 		}
-		if (!wait_for_complete_for_this_stream) {
+
+		intf = SRC_TO_INTF(stream_info->stream_src);
+		if (!wait_for_complete_for_this_stream ||
+			stream_info->state == INACTIVE ||
+			!vfe_dev->axi_data.src_info[intf].active) {
 			msm_isp_axi_stream_enable_cfg(vfe_dev, stream_info);
 			stream_info->state = INACTIVE;
 			vfe_dev->hw_info->vfe_ops.core_ops.reg_update(vfe_dev,
 				SRC_TO_INTF(stream_info->stream_src));
 		} else
-			src_mask |= (1 << SRC_TO_INTF(stream_info->stream_src));
+			src_mask |= (1 << intf);
 
 	}
 
@@ -1834,6 +1841,8 @@ static int msm_isp_stop_axi_stream(struct vfe_device *vfe_dev,
 			src_mask, 2);
 		if (rc < 0) {
 			pr_err("%s: wait for config done failed\n", __func__);
+			if (rc == -EINVAL)
+				return rc;
 			for (i = 0; i < stream_cfg_cmd->num_streams; i++) {
 				stream_info = &axi_data->stream_info[
 				HANDLE_TO_IDX(
@@ -1960,12 +1969,10 @@ static int msm_isp_request_frame(struct vfe_device *vfe_dev,
 	stream_cfg_cmd.frame_skip_pattern = NO_SKIP;
 	stream_cfg_cmd.init_frame_drop = 0;
 	stream_cfg_cmd.burst_count = stream_info->request_q_cnt;
-	msm_isp_calculate_framedrop(&vfe_dev->axi_data, &stream_cfg_cmd);
-	msm_isp_reset_framedrop(vfe_dev, stream_info);
 
 	if (stream_info->undelivered_request_cnt == 1) {
 		rc = msm_isp_cfg_ping_pong_address(vfe_dev, stream_info,
-			VFE_PING_FLAG);
+			VFE_PING_FLAG, 1);
 		if (rc) {
 			spin_unlock_irqrestore(&stream_info->lock, flags);
 			pr_err("%s:%d fail to set ping pong address\n",
@@ -1982,7 +1989,7 @@ static int msm_isp_request_frame(struct vfe_device *vfe_dev,
 				vfe_dev);
 
 		rc = msm_isp_cfg_ping_pong_address(vfe_dev, stream_info,
-			pingpong_status);
+			pingpong_status, 1);
 		if (rc) {
 			spin_unlock_irqrestore(&stream_info->lock, flags);
 			pr_err("%s:%d fail to set ping pong address\n",
@@ -1990,6 +1997,9 @@ static int msm_isp_request_frame(struct vfe_device *vfe_dev,
 			return rc;
 		}
 	}
+
+	msm_isp_calculate_framedrop(&vfe_dev->axi_data, &stream_cfg_cmd);
+	msm_isp_reset_framedrop(vfe_dev, stream_info);
 
 	spin_unlock_irqrestore(&stream_info->lock, flags);
 
@@ -2210,6 +2220,7 @@ void msm_isp_process_axi_irq(struct vfe_device *vfe_dev,
 	struct msm_vfe_axi_composite_info *comp_info;
 	struct msm_vfe_axi_shared_data *axi_data = &vfe_dev->axi_data;
 	unsigned long flags;
+	uint8_t valid_address;
 
 	comp_mask = vfe_dev->hw_info->vfe_ops.axi_ops.
 		get_comp_mask(irq_status0, irq_status1);
@@ -2245,6 +2256,8 @@ void msm_isp_process_axi_irq(struct vfe_device *vfe_dev,
 
 			ISP_DBG("%s: stream id %x frame id: 0x%x\n", __func__,
 				stream_info->stream_id, stream_info->frame_id);
+
+			spin_lock_irqsave(&stream_info->lock, flags);
 			stream_info->frame_id++;
 
 			if (stream_info->stream_type == BURST_STREAM) {
@@ -2254,14 +2267,17 @@ void msm_isp_process_axi_irq(struct vfe_device *vfe_dev,
 				stream_info->runtime_num_burst_capture--;
 			}
 
-			spin_lock_irqsave(&stream_info->lock, flags);
 			msm_isp_get_done_buf(vfe_dev, stream_info,
 				pingpong_status, &done_buf);
 			if (stream_info->stream_type == CONTINUOUS_STREAM ||
 				stream_info->runtime_num_burst_capture > 1) {
-				rc = msm_isp_cfg_ping_pong_address(vfe_dev,
-					stream_info, pingpong_status);
-			}
+				valid_address = 1;
+			} else
+				valid_address = 0;
+
+			rc = msm_isp_cfg_ping_pong_address(vfe_dev,
+				stream_info, pingpong_status, valid_address);
+
 			spin_unlock_irqrestore(&stream_info->lock, flags);
 
 			if (done_buf && !rc)
@@ -2289,6 +2305,8 @@ void msm_isp_process_axi_irq(struct vfe_device *vfe_dev,
 
 			ISP_DBG("%s: stream id %x frame id: 0x%x\n", __func__,
 				stream_info->stream_id, stream_info->frame_id);
+
+			spin_lock_irqsave(&stream_info->lock, flags);
 			stream_info->frame_id++;
 
 			if (stream_info->stream_type == BURST_STREAM) {
@@ -2298,14 +2316,17 @@ void msm_isp_process_axi_irq(struct vfe_device *vfe_dev,
 				stream_info->runtime_num_burst_capture--;
 			}
 
-			spin_lock_irqsave(&stream_info->lock, flags);
 			msm_isp_get_done_buf(vfe_dev, stream_info,
 						pingpong_status, &done_buf);
 			if (stream_info->stream_type == CONTINUOUS_STREAM ||
 				stream_info->runtime_num_burst_capture > 1) {
-				rc = msm_isp_cfg_ping_pong_address(vfe_dev,
-					stream_info, pingpong_status);
-			}
+				valid_address = 1;
+			} else
+				valid_address = 0;
+
+			rc = msm_isp_cfg_ping_pong_address(vfe_dev,
+				stream_info, pingpong_status, valid_address);
+
 			spin_unlock_irqrestore(&stream_info->lock, flags);
 
 			if (done_buf && !rc)

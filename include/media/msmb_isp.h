@@ -160,6 +160,8 @@ struct msm_vfe_camif_subsample_cfg {
 	uint32_t irq_subsample_period;
 	uint32_t irq_subsample_pattern;
 	uint32_t sof_counter_step;
+	uint32_t pixel_skip;
+	uint32_t line_skip;
 };
 
 /*
@@ -322,6 +324,7 @@ struct msm_vfe_axi_stream_cfg_update_info {
 struct msm_vfe_axi_halt_cmd {
 	uint32_t stop_camif;
 	uint32_t overflow_detected;
+	uint32_t blocking_halt;
 };
 
 struct msm_vfe_axi_reset_cmd {
