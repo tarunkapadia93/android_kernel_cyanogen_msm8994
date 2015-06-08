@@ -2025,10 +2025,8 @@ void mdss_dsi_cmd_mdp_busy(struct mdss_dsi_ctrl_pdata *ctrl)
 		spin_unlock_irqrestore(&ctrl->mdp_lock, flags);
 		if (!rc) {
 			pr_err("%s: timeout error\n", __func__);
-#ifndef CONFIG_MACH_PM9X
 			MDSS_XLOG_TOUT_HANDLER("mdp", "dsi0_ctrl", "dsi0_phy",
 				"dsi1_ctrl", "dsi1_phy", "panic");
-#endif
 		}
 	}
 
