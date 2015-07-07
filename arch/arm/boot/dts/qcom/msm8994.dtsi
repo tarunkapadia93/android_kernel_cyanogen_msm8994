@@ -1345,6 +1345,8 @@
 		interrupt-parent = <&msm_gpio>;
 		interrupts = <72 0>;
 		interrupt-names = "cdc-int";
+		pinctrl-names = "default";
+		pinctrl-0 = <&wcd_intr_default>;
 	};
 
 	tspp: msm_tspp@f99d8000 {
@@ -3171,6 +3173,11 @@
 		sensor_information22: qcom,sensor-information@22 {
 			qcom,sensor-type =  "llm";
 			qcom,sensor-name = "LLM_IA57";
+		};
+
+		sensor_information23: qcom,sensor-information-23 {
+			qcom,sensor-type =  "adc";
+			qcom,sensor-name = "battery";
 		};
 	};
 
