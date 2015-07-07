@@ -27,10 +27,10 @@
 #include "mdss_fb.h"
 
 #define MDSS_MDP_DEFAULT_INTR_MASK 0
-#define MDSS_MDP_CURSOR_WIDTH 64
-#define MDSS_MDP_CURSOR_HEIGHT 64
-#define MDSS_MDP_CURSOR_SIZE (MDSS_MDP_CURSOR_WIDTH*MDSS_MDP_CURSOR_WIDTH*4)
 #define MDSS_MDP_PIXEL_RAM_SIZE (50 * 1024)
+
+#define SVS_PLUS_MIN_HW_110 171430000
+#define SVS_PLUS_MAX_HW_110 266670000
 
 #define PHASE_STEP_SHIFT	21
 #define MAX_LINE_BUFFER_WIDTH	2048
@@ -268,6 +268,7 @@ struct mdss_mdp_ctl {
 	struct mdss_mdp_mixer *mixer_right;
 	struct mutex lock;
 	struct mutex offlock;
+	struct mutex flush_lock;
 	struct mutex *shared_lock;
 	spinlock_t spin_lock;
 
@@ -400,6 +401,7 @@ struct pp_hist_col_info {
 	spinlock_t hist_lock;
 	char __iomem *base;
 	u32 intr_shift;
+	u32 disp_num;
 };
 
 struct mdss_mdp_ad {
@@ -855,6 +857,19 @@ static inline u32 left_lm_w_from_mfd(struct msm_fb_data_type *mfd)
 			width);
 	}
 	return width;
+}
+
+static inline u32 mdss_mdp_get_cursor_frame_size(struct mdss_data_type *mdata)
+{
+	return mdata->max_cursor_size *  mdata->max_cursor_size * 4;
+}
+
+static inline bool __is_mdp_clk_svs_plus_range(struct mdss_data_type *mdata,
+		u32 rate)
+{
+	return (mdss_has_quirk(mdata, MDSS_QUIRK_SVS_PLUS_VOTING)) &&
+		(rate > mdata->svs_plus_min) &&
+		(rate <= mdata->svs_plus_max);
 }
 
 irqreturn_t mdss_mdp_isr(int irq, void *ptr);
