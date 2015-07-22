@@ -1633,6 +1633,9 @@ static void taper_irq_en(struct smbchg_chip *chip, bool en)
 	mutex_unlock(&chip->taper_irq_lock);
 }
 
+#ifdef CONFIG_MACH_PM9X
+#define PARALLEL_MONITOR_TIMER_MS 30000
+#endif
 static void smbchg_parallel_usb_disable(struct smbchg_chip *chip)
 {
 	struct power_supply *parallel_psy = get_parallel_psy(chip);
@@ -1647,6 +1650,14 @@ static void smbchg_parallel_usb_disable(struct smbchg_chip *chip)
 	power_supply_set_current_limit(parallel_psy,
 				SUSPEND_CURRENT_MA * 1000);
 	power_supply_set_present(parallel_psy, false);
+
+#ifdef CONFIG_MACH_PM9X
+	schedule_delayed_work(
+			&chip->parallel_en_work,
+			msecs_to_jiffies(PARALLEL_MONITOR_TIMER_MS));
+	pr_smb(PR_STATUS, "parallel charger monitor start per %d seconds\n", PARALLEL_MONITOR_TIMER_MS);
+#endif
+
 #ifndef CONFIG_MACH_PM9X
 	chip->target_fastchg_current_ma = chip->cfg_fastchg_current_ma;
 	smbchg_set_fastchg_current(chip, chip->target_fastchg_current_ma);
@@ -4089,6 +4100,11 @@ static void handle_usb_removal(struct smbchg_chip *chip)
 	}
 	chip->parallel.enabled_once = false;
 	chip->vbat_above_headroom = false;
+
+#ifdef CONFIG_MACH_PM9X
+	cancel_delayed_work(&chip->parallel_en_work);
+#endif
+
 }
 
 static bool is_src_detect_high(struct smbchg_chip *chip)
