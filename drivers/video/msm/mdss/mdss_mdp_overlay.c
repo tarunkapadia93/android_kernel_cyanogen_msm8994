@@ -3105,7 +3105,7 @@ int mdss_mdp_cursor_pipe_setup(struct msm_fb_data_type *mfd,
 
 	pr_debug("req id:%d cursor_pipe:%d pnum:%d\n",
 		req->id, cursor_pipe, pipe->ndx);
-
+#ifndef CONFIG_MACH_PM9X
 	if (mdata->mdss_util->iommu_attached()) {
 		cursor_addr = mfd->cursor_buf_iova;
 	} else {
@@ -3116,7 +3116,9 @@ int mdss_mdp_cursor_pipe_setup(struct msm_fb_data_type *mfd,
 		}
 		cursor_addr = mfd->cursor_buf_phys;
 	}
-
+#else
+		cursor_addr = mfd->cursor_buf_iova;
+#endif
 	buf = mdss_mdp_overlay_buf_alloc(mfd, pipe);
 	if (!buf) {
 		pr_err("unable to allocate memory for cursor buffer\n");
