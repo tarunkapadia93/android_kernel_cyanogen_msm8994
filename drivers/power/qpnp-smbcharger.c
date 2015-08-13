@@ -252,6 +252,9 @@ struct smbchg_chip {
 	struct mutex			dc_en_lock;
 	struct mutex			fcc_lock;
 	struct mutex			pm_lock;
+#ifdef CONFIG_BATTERY_JEITA_COMPLIANCE
+	struct mutex			batt_warm_paralle_lock;
+#endif
 	/* aicl deglitch workaround */
 	unsigned long			first_aicl_seconds;
 	int				aicl_irq_count;
@@ -272,6 +275,7 @@ enum wake_reason {
 	PM_PARALLEL_CHECK = BIT(0),
 	PM_REASON_VFLOAT_ADJUST = BIT(1),
 	PM_ESR_PULSE = BIT(2),
+	PM_BATT_WARM_PARALLEL_CHECK = BIT(3),
 };
 
 static int smbchg_debug_mask;
@@ -1956,8 +1960,9 @@ static void smbchg_parallel_batt_warm_usb_en_work(struct work_struct *work)
 	struct smbchg_chip *chip = container_of(work,
 				struct smbchg_chip,
 				parallel_batt_warm_en_work.work);
-	smbchg_relax(chip, PM_PARALLEL_CHECK);
-	mutex_lock(&chip->parallel.lock);
+
+	smbchg_relax(chip, PM_BATT_WARM_PARALLEL_CHECK);
+	mutex_lock(&chip->batt_warm_paralle_lock);
 	if (smbchg_is_parallel_usb_ok(chip)) {
 		smbchg_parallel_usb_enable(chip);
 		chip->parallel_batt_warm_work_tries = 0;
@@ -1975,7 +1980,7 @@ static void smbchg_parallel_batt_warm_usb_en_work(struct work_struct *work)
 			pr_smb(PR_STATUS, "parallel charging reschedule stop, tries %d\n", chip->parallel_batt_warm_work_tries);
 		}
 	}
-	mutex_unlock(&chip->parallel.lock);
+	mutex_unlock(&chip->batt_warm_paralle_lock);
 }
 #endif
 
@@ -3894,6 +3899,7 @@ static int smbchg_charging_status_change(struct smbchg_chip *chip)
 #ifdef CONFIG_BATTERY_JEITA_COMPLIANCE
 #define HOT_RECHARGING_WORK_MS 10000
 #define WARM_RECHARGING_WORK_MS 10000
+#define BATT_HOT_RECHARGING_THRESHOLD 500
 unsigned hot_recharging_enable;
 #endif
 static irqreturn_t batt_hot_handler(int irq, void *_chip)
@@ -3912,7 +3918,7 @@ static irqreturn_t batt_hot_handler(int irq, void *_chip)
 	if(!chip->batt_hot) {
 		get_property_from_fg(chip, POWER_SUPPLY_PROP_TEMP, &bat_temp_now);
 
-		if(bat_temp_now > 500) {
+		if(bat_temp_now > BATT_HOT_RECHARGING_THRESHOLD) {
 			smbchg_battchg_en(chip, 0, REASON_BATTCHG_USER, &unused);
 			chip->hot_recharging_en = 0;
 			smbchg_source_stay_awake(&chip->hot_recharging_wakeup_source);
@@ -3947,7 +3953,7 @@ static void smbchg_hot_recharging_det_work(struct work_struct *work)
 
 	if(!chip->batt_hot) {
 		get_property_from_fg(chip, POWER_SUPPLY_PROP_TEMP, &bat_temp_now);
-		if(bat_temp_now <= 500) {
+		if(bat_temp_now <= BATT_HOT_RECHARGING_THRESHOLD) {
 			//recharging enable while battery temp below 50 degree
 			smbchg_battchg_en(chip, 1, REASON_BATTCHG_USER, &unused);
 			chip->hot_recharging_en = 1;
@@ -4042,6 +4048,7 @@ static void smbchg_warm_recharging_det_work(struct work_struct *work)
 			cancel_delayed_work(&chip->warm_recharging_det_work);
 			smbchg_source_relax(&chip->warm_recharging_wakeup_source);
 			chip->warm_recharging_en = 1;
+			smbchg_stay_awake(chip, PM_BATT_WARM_PARALLEL_CHECK);
 			schedule_delayed_work(&chip->parallel_batt_warm_en_work, 
 				msecs_to_jiffies(PARALLEL_BATT_WARM_RECHARGING_WORK_MS));
 			if (chip->psy_registered)
@@ -4325,8 +4332,11 @@ static void handle_usb_removal(struct smbchg_chip *chip)
 	chip->parallel.enabled_once = false;
 	chip->vbat_above_headroom = false;
 
-#ifdef CONFIG_MACH_PM9X
-	cancel_delayed_work(&chip->parallel_en_work);
+#ifdef CONFIG_BATTERY_JEITA_COMPLIANCE
+	if (chip->parallel_batt_warm_work_tries) {
+		chip->parallel_batt_warm_work_tries = 0;
+		cancel_delayed_work(&chip->parallel_batt_warm_en_work);
+	}
 #endif
 #ifdef CONFIG_BATTERY_JEITA_COMPLIANCE
 	if (!chip->hot_recharging_en) {
@@ -5953,6 +5963,9 @@ static int smbchg_probe(struct spmi_device *spmi)
 	chip->warm_recharging_en = 1;
 #endif
 	spin_lock_init(&chip->sec_access_lock);
+#ifdef CONFIG_BATTERY_JEITA_COMPLIANCE
+	mutex_init(&chip->batt_warm_paralle_lock);
+#endif
 	mutex_init(&chip->fcc_lock);
 	mutex_init(&chip->current_change_lock);
 	mutex_init(&chip->usb_set_online_lock);
