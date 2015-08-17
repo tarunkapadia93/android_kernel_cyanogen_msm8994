@@ -806,7 +806,7 @@ int mdss_iommu_ctrl(int enable)
 		 */
 		if (!mdata->iommu_attached && !mdata->handoff_pending) {
 			if (mdata->needs_iommu_bw_vote)
-				mdss_bus_scale_set_quota(MDSS_HW_IOMMU,
+				mdss_bus_scale_set_quota(MDSS_IOMMU_RT,
 					SZ_1M, SZ_1M);
 			rc = mdss_iommu_attach(mdata);
 		}
@@ -817,7 +817,7 @@ int mdss_iommu_ctrl(int enable)
 			if (mdata->iommu_ref_cnt == 0) {
 				rc = mdss_iommu_dettach(mdata);
 				if (mdata->needs_iommu_bw_vote)
-					mdss_bus_scale_set_quota(MDSS_HW_IOMMU,
+					mdss_bus_scale_set_quota(MDSS_IOMMU_RT,
 						0, 0);
 			}
 		} else {
@@ -2391,10 +2391,17 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 			goto parse_fail;
 
 		rc = mdss_mdp_parse_dt_handler(pdev,
-			"qcom,mdss-pipe-dma-xin-id", xin_id,
+			"qcom,mdss-pipe-cursor-xin-id", xin_id,
 			mdata->ncursor_pipes);
 		if (rc)
 			goto parse_fail;
+
+		rc = mdss_mdp_parse_dt_pipe_clk_ctrl(pdev,
+			"qcom,mdss-pipe-cursor-clk-ctrl-offsets",
+			mdata->cursor_pipes, mdata->ncursor_pipes);
+		if (rc)
+			pr_err("cursor-clk-ctrl-offsets is not set\n");
+
 		/* set the fetch id to an invalid value */
 		for (i = 0; i < mdata->ncursor_pipes; i++)
 			ftch_id[i] = -1;
