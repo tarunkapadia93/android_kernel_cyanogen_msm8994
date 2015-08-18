@@ -1658,8 +1658,7 @@ eHalStatus csrScanHandleSearchForSSID(tpAniSirGlobal pMac, tSmeCmd *pCommand)
     {
 #ifdef WLAN_FEATURE_ROAM_SCAN_OFFLOAD
         /* If this scan is for LFR */
-        if (sessionId < CSR_ROAM_SESSION_MAX &&
-				pMac->roam.neighborRoamInfo[sessionId].uOsRequestedHandoff) {
+        if (pMac->roam.neighborRoamInfo[sessionId].uOsRequestedHandoff) {
             /* Notify LFR state m/c */
             if (eHAL_STATUS_SUCCESS != csrNeighborRoamSssidScanDone(pMac,
                                                      sessionId,
@@ -1747,8 +1746,7 @@ eHalStatus csrScanHandleSearchForSSIDFailure(tpAniSirGlobal pMac, tSmeCmd *pComm
     tCsrRoamSession *pSession = CSR_GET_SESSION( pMac, sessionId );
 #ifdef WLAN_FEATURE_ROAM_SCAN_OFFLOAD
     /* If this scan is for LFR */
-    if (sessionId < CSR_ROAM_SESSION_MAX &&
-			pMac->roam.neighborRoamInfo[sessionId].uOsRequestedHandoff) {
+    if (pMac->roam.neighborRoamInfo[sessionId].uOsRequestedHandoff) {
         /* Notify LFR state m/c */
         if (eHAL_STATUS_SUCCESS != csrNeighborRoamSssidScanDone(pMac,
                                                 sessionId,
