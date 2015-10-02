@@ -111,7 +111,7 @@
 
 #define CFG_1A_REG			0x1A
 #ifdef CONFIG_MACH_PM9X
-#define TEMP_MONITOR_EN_BIT	BIT(6)
+#define JEITA_PROT_EN_BIT		BIT(5) | BIT(6)
 #endif
 #define HOT_SOFT_VFLOAT_COMP_EN_BIT	BIT(3)
 #define COLD_SOFT_VFLOAT_COMP_EN_BIT	BIT(2)
@@ -1862,6 +1862,11 @@ static int smb135x_parallel_set_chg_present(struct smb135x_chg *chip,
 	} else {
 		chip->real_usb_psy_ma = SUSPEND_CURRENT_MA;
 	}
+
+#ifdef CONFIG_MACH_PM9X
+	rc = smb135x_masked_write(chip, CFG_1A_REG, JEITA_PROT_EN_BIT, 0);
+#endif
+
 	return 0;
 }
 
@@ -4308,7 +4313,7 @@ static int smb135x_parallel_charger_probe(struct i2c_client *client,
 	create_debugfs_entries(chip);
 
 #ifdef CONFIG_MACH_PM9X
-	rc = smb135x_masked_write(chip, CFG_1A_REG, TEMP_MONITOR_EN_BIT, 0);
+	rc = smb135x_masked_write(chip, CFG_1A_REG, JEITA_PROT_EN_BIT, 0);
 #endif
 
 	dev_info(chip->dev, "SMB135X USB PARALLEL CHARGER version = %s successfully probed\n",
