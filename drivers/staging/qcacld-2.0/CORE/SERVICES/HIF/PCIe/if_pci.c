@@ -793,7 +793,7 @@ static int hif_pci_autopm_debugfs_show(struct seq_file *s, void *data)
 #define HIF_PCI_AUTOPM_STATS(_s, _sc, _name) \
 	seq_printf(_s, "%30s: %u\n", #_name, _sc->pm_stats._name)
 	struct hif_pci_softc *sc = s->private;
-	char *autopm_state[] = {"NONE", "ON", "INPROGRESS", "SUSPENDED"};
+	char *autopm_state[] = {"ON", "INPROGRESS", "SUSPENDED"};
 	unsigned int msecs_age;
 	int pm_state = atomic_read(&sc->pm_state);
 	unsigned long timer_expires;
@@ -811,6 +811,9 @@ static int hif_pci_autopm_debugfs_show(struct seq_file *s, void *data)
 
 	seq_printf(s, "%30s: %d\n", "PM Usage count",
 			atomic_read(&sc->dev->power.usage_count));
+
+	seq_printf(s, "%30s: %d\n", "prevent_suspend_cnt",
+			atomic_read(&sc->prevent_suspend_cnt));
 
 	HIF_PCI_AUTOPM_STATS(s, sc, suspended);
 	HIF_PCI_AUTOPM_STATS(s, sc, suspend_err);
@@ -847,24 +850,30 @@ static const struct file_operations hif_pci_autopm_fops = {
 
 static int __hif_pci_runtime_suspend(struct pci_dev *pdev)
 {
-	struct hif_pci_softc *sc = pci_get_drvdata(pdev);
+	struct hif_pci_softc *sc = NULL;
 	void *vos_context = vos_get_global_context(VOS_MODULE_ID_HIF, NULL);
 	pm_message_t state = { .event = PM_EVENT_SUSPEND };
 	v_VOID_t *temp_module;
 	ol_txrx_pdev_handle txrx_pdev;
 	int ret = -EBUSY, test = 0;
 
-	adf_os_atomic_set(&sc->pm_state, HIF_PM_RUNTIME_STATE_INPROGRESS);
-
 	if (vos_is_load_unload_in_progress(VOS_MODULE_ID_HIF, NULL)) {
 		pr_err("%s: Load/Unload in Progress\n", __func__);
-		goto out;
+		goto end;
 	}
 
 	if (vos_is_logp_in_progress(VOS_MODULE_ID_HIF, NULL)) {
 		pr_err("%s: LOGP in progress\n", __func__);
-		goto out;
+		goto end;
 	}
+
+	sc = pci_get_drvdata(pdev);
+	if (!sc) {
+		pr_err("%s: sc is NULL!\n", __func__);
+		goto end;
+	}
+
+	adf_os_atomic_set(&sc->pm_state, HIF_PM_RUNTIME_STATE_INPROGRESS);
 
 	txrx_pdev = vos_get_context(VOS_MODULE_ID_TXRX, vos_context);
 	if (!txrx_pdev) {
@@ -892,6 +901,14 @@ static int __hif_pci_runtime_suspend(struct pci_dev *pdev)
 		goto out;
 	}
 
+#ifdef FEATURE_WLAN_D0WOW
+	if (wma_get_client_count(temp_module)) {
+		pr_err("%s: Runtime PM not supported when clients are connected\n",
+				__func__);
+		goto out;
+	}
+#endif
+
 	ret = wma_runtime_suspend_req(temp_module);
 	if (ret) {
 		pr_err("%s: Runtime Offloads configuration failed: %d\n",
@@ -904,15 +921,6 @@ static int __hif_pci_runtime_suspend(struct pci_dev *pdev)
 		pr_err("%s: pci_suspend failed: %d\n", __func__, ret);
 		goto suspend_fail;
 	}
-
-#ifdef FEATURE_WLAN_D0WOW
-	if (wma_get_client_count(temp_module)) {
-		pr_err("%s: Runtime PM not supported when clients are connected\n",
-				__func__);
-		ret = -EINVAL;
-		goto suspend_fail;
-	}
-#endif
 
 	ret = cnss_auto_suspend();
 
@@ -933,9 +941,8 @@ out:
 	adf_os_atomic_set(&sc->pm_state, HIF_PM_RUNTIME_STATE_ON);
 	sc->pm_stats.suspend_err++;
 	hif_pm_runtime_mark_last_busy(sc->dev);
-
+end:
 	ASSERT(ret == -EAGAIN || ret == -EBUSY);
-
 	return ret;
 }
 
@@ -1037,37 +1044,14 @@ static inline void hif_pci_pm_debugfs(struct hif_pci_softc *sc, bool init)
 }
 #endif
 
-static void hif_pci_runtime_pm_timeout_fn(unsigned long data)
+static void hif_pci_pm_runtime_pre_init(struct hif_pci_softc *sc)
 {
-	struct hif_pci_softc *hif_sc = (struct hif_pci_softc *)data;
-	unsigned long flags;
-	unsigned long timer_expires;
+	spin_lock_init(&sc->runtime_lock);
+	setup_timer(&sc->runtime_timer, hif_pci_runtime_pm_timeout_fn,
+			(unsigned long)sc);
 
-	spin_lock_irqsave(&hif_sc->runtime_lock, flags);
-
-	timer_expires = hif_sc->runtime_timer_expires;
-
-	/* Make sure we are not called too early, this should take care of
-	 * following case
-	 *
-	 * CPU0                         CPU1 (timeout function)
-         * ----                         ----------------------
-	 * spin_lock_irq
-	 *                              timeout function called
-	 *
-	 * mod_timer()
-	 *
-	 * spin_unlock_irq
-	 *                              spin_lock_irq
-	 */
-	if (timer_expires > 0 && !time_after(timer_expires, jiffies)) {
-
-		hif_sc->runtime_timer_expires = 0;
-		hif_pm_runtime_put_auto(hif_sc->dev);
-		hif_sc->pm_stats.allow_suspend_timeout++;
-	}
-
-	spin_unlock_irqrestore(&hif_sc->runtime_lock, flags);
+	adf_os_atomic_init(&sc->pm_state);
+	adf_os_atomic_set(&sc->pm_state, HIF_PM_RUNTIME_STATE_ON);
 }
 
 static void hif_pci_pm_runtime_init(struct hif_pci_softc *sc)
@@ -1091,12 +1075,6 @@ static void hif_pci_pm_runtime_init(struct hif_pci_softc *sc)
 	pr_info("%s: Enabling RUNTIME PM, Delay: %d ms\n", __func__,
 			ol_sc->runtime_pm_delay);
 
-	spin_lock_init(&sc->runtime_lock);
-	setup_timer(&sc->runtime_timer, hif_pci_runtime_pm_timeout_fn,
-			(unsigned long)sc);
-
-	adf_os_atomic_init(&sc->pm_state);
-	adf_os_atomic_set(&sc->pm_state, HIF_PM_RUNTIME_STATE_ON);
 	cnss_init_work(&sc->pm_work, hif_pci_pm_work);
 	cnss_runtime_init(sc->dev, ol_sc->runtime_pm_delay);
 	hif_pci_pm_debugfs(sc, true);
@@ -1118,7 +1096,6 @@ static void hif_pci_pm_runtime_exit(struct hif_pci_softc *sc)
 	hif_pm_runtime_resume(sc->dev);
 	cnss_runtime_exit(sc->dev);
 	hif_pci_pm_debugfs(sc, false);
-	adf_os_atomic_set(&sc->pm_state, HIF_PM_RUNTIME_STATE_NONE);
 
 	del_timer_sync(&sc->runtime_timer);
 
@@ -1126,10 +1103,12 @@ static void hif_pci_pm_runtime_exit(struct hif_pci_softc *sc)
 		hif_pm_runtime_put_auto(sc->dev);
 		sc->runtime_timer_expires = 0;
 	}
+
+	cnss_flush_work(&sc->pm_work);
 }
 #else
 static inline void hif_pci_pm_runtime_init(struct hif_pci_softc *sc) { }
-
+static inline void hif_pci_pm_runtime_pre_init(struct hif_pci_softc *sc) { }
 static inline void hif_pci_pm_runtime_exit(struct hif_pci_softc *sc) { }
 #endif
 
@@ -1368,6 +1347,9 @@ again:
     ol_sc->hif_sc = (void *)sc;
     sc->ol_sc = ol_sc;
     ol_sc->target_type = target_type;
+
+    hif_pci_pm_runtime_pre_init(sc);
+
     if (hif_pci_configure(sc, &ol_sc->hif_hdl))
 	    goto err_config;
 
@@ -1710,6 +1692,8 @@ again:
     ol_sc->hif_sc = (void *)sc;
     sc->ol_sc = ol_sc;
     ol_sc->target_type = target_type;
+
+    hif_pci_pm_runtime_pre_init(sc);
 
     if (hif_pci_configure(sc, &ol_sc->hif_hdl))
         goto err_config;
@@ -2130,6 +2114,11 @@ void hif_pci_shutdown(struct pci_dev *pdev)
     /* this is for cases, where shutdown invoked from CNSS */
     vos_set_logp_in_progress(VOS_MODULE_ID_HIF, TRUE);
 
+    if (!vos_is_ssr_ready(__func__))
+        pr_info("Host driver is not ready for SSR, attempting anyway\n");
+
+    hif_pci_device_reset(sc);
+
     scn = sc->ol_sc;
 
 #ifndef REMOVE_PKT_LOG
@@ -2140,13 +2129,12 @@ void hif_pci_shutdown(struct pci_dev *pdev)
 
     hif_pci_pm_runtime_exit(sc);
 
-    if (!vos_is_ssr_ready(__func__))
-        printk("Host driver is not ready for SSR, attempting anyway\n");
-
     hif_dump_pipe_debug_count(sc->hif_device);
 
-    if (!WLAN_IS_EPPING_ENABLED(vos_get_conparam()))
+    if (!WLAN_IS_EPPING_ENABLED(vos_get_conparam())) {
+        hif_disable_isr(scn);
         hdd_wlan_shutdown();
+    }
 
     mem = (void __iomem *)sc->mem;
 

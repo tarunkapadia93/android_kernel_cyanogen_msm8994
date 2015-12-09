@@ -704,21 +704,13 @@ tANI_BOOLEAN smeProcessScanQueue(tpAniSirGlobal pMac)
             if (pEntry) {
                 pCommand = GET_BASE_ADDR( pEntry, tSmeCmd, Link );
                 if (pSmeCommand != NULL) {
-                    /*
-                    * if scan is running on one interface and SME receives
-                    * the next command on the same interface then
-                    * dont the allow the command to be queued to
-                    * smeCmdPendingList. If next scan is allowed on
-                    * the same interface the CSR state machine will
-                    * get screwed up.
-                    */
-                     if (pSmeCommand->sessionId == pCommand->sessionId) {
-                          smsLog(pMac, LOGE,
-                                "SME command is pending on session %d",
-                                pSmeCommand->sessionId);
-                            status = eANI_BOOLEAN_FALSE;
-                          goto end;
-                      }
+                    /* if there is an active SME command, do not process
+                     * the pending scan cmd
+                     */
+                    smsLog(pMac, LOGE, "SME scan cmd is pending on session %d",
+                           pSmeCommand->sessionId);
+                    status = eANI_BOOLEAN_FALSE;
+                    goto end;
                 }
                 //We cannot execute any command in wait-for-key state until setKey is through.
                 if (CSR_IS_WAIT_FOR_KEY( pMac, pCommand->sessionId))
@@ -825,6 +817,25 @@ sme_process_cmd:
                 if( CSR_IS_WAIT_FOR_KEY( pMac, pCommand->sessionId ) &&
                     !CSR_IS_DISCONNECT_COMMAND( pCommand ) )
                 {
+                    if (CSR_IS_CLOSE_SESSION_COMMAND(pCommand)) {
+                        tSmeCmd *sme_cmd = NULL;
+
+                        smsLog(pMac, LOGE,
+                                 FL("SessionId %d: close session command issued while waiting for key, issue disconnect first"),
+                                 pCommand->sessionId);
+                        status = csr_prepare_disconnect_command(pMac,
+                                             pCommand->sessionId, &sme_cmd);
+                        if (HAL_STATUS_SUCCESS(status) && sme_cmd) {
+                            csrLLLock(&pMac->sme.smeCmdPendingList);
+                            csrLLInsertHead(&pMac->sme.smeCmdPendingList,
+                                              &sme_cmd->Link, LL_ACCESS_NOLOCK);
+                            pEntry = csrLLPeekHead(&pMac->sme.smeCmdPendingList,
+                                                      LL_ACCESS_NOLOCK);
+                            csrLLUnlock(&pMac->sme.smeCmdPendingList);
+                            goto sme_process_cmd;
+                        }
+                    }
+
                     if( !CSR_IS_SET_KEY_COMMAND( pCommand ) )
                     {
                         csrLLUnlock( &pMac->sme.smeCmdActiveList );
@@ -2774,6 +2785,12 @@ eHalStatus sme_ProcessMsg(tHalHandle hHal, vos_msg_t* pMsg)
                {
                    vos_mem_free(pMsg->bodyptr);
                }
+               break;
+          case eWNI_SME_GET_RSSI_IND:
+               if (pMac->sme.pget_rssi_ind_cb)
+                   pMac->sme.pget_rssi_ind_cb(pMsg->bodyptr,
+                                            pMac->sme.pget_rssi_cb_context);
+               vos_mem_free(pMsg->bodyptr);
                break;
           case eWNI_SME_CSA_OFFLOAD_EVENT:
                if (pMsg->bodyptr)
@@ -11365,6 +11382,63 @@ eHalStatus sme_GetLinkSpeed(tHalHandle hHal, tSirLinkSpeedInfo *lsReq, void *pls
     return(status);
 }
 #endif /* FEATURE_WLAN_TDLS */
+
+/**
+ * sme_get_rssi() - get station's rssi
+ * @hal: hal interface
+ * @req: get rssi request information
+ * @context: event handle context
+ * @pcallbackfn: callback function pointer
+ *
+ * This function will send WDA_GET_RSSI to WMA
+ *
+ * Return: 0 on success, otherwise error value
+ */
+eHalStatus sme_get_rssi(tHalHandle hal, struct sir_rssi_req req,
+			void *context,
+			void (*callbackfn)(struct sir_rssi_resp *param,
+						void *pcontext))
+{
+
+	eHalStatus          status    = eHAL_STATUS_SUCCESS;
+	VOS_STATUS          vosstatus = VOS_STATUS_SUCCESS;
+	tpAniSirGlobal      mac       = PMAC_STRUCT(hal);
+	vos_msg_t           vosmessage;
+
+	status = sme_AcquireGlobalLock(&mac->sme);
+	if (eHAL_STATUS_SUCCESS == status) {
+		if (NULL == callbackfn) {
+			VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+				"%s: Indication Call back is NULL",
+				__func__);
+			sme_ReleaseGlobalLock(&mac->sme);
+			return eHAL_STATUS_FAILURE;
+		}
+
+		mac->sme.pget_rssi_ind_cb = callbackfn;
+		mac->sme.pget_rssi_cb_context = context;
+
+		/* serialize the req through MC thread */
+		vosmessage.bodyptr = vos_mem_malloc(sizeof(req));
+		if (NULL == vosmessage.bodyptr) {
+			VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+				"%s: Memory allocation failed.", __func__);
+			sme_ReleaseGlobalLock(&mac->sme);
+			return eHAL_STATUS_E_MALLOC_FAILED;
+		}
+		vos_mem_copy(vosmessage.bodyptr, &req, sizeof(req));
+		vosmessage.type    = WDA_GET_RSSI;
+		vosstatus = vos_mq_post_message(VOS_MQ_ID_WDA, &vosmessage);
+		if (!VOS_IS_STATUS_SUCCESS(vosstatus)) {
+			VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+				"%s: Post get rssi msg fail", __func__);
+			status = eHAL_STATUS_FAILURE;
+		}
+		sme_ReleaseGlobalLock(&mac->sme);
+	}
+	return status;
+}
+
 /* ---------------------------------------------------------------------------
     \fn sme_IsPmcBmps
     \API to Check if PMC state is BMPS.

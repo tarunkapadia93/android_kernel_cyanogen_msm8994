@@ -262,6 +262,8 @@ struct statsContext
    struct completion completion;
    hdd_adapter_t *pAdapter;
    unsigned int magic;
+   union iwreq_data *wrqu;
+   char *extra;
 };
 
 struct linkspeedContext
@@ -816,11 +818,6 @@ typedef struct hdd_scaninfo_s
    vos_event_t scan_finished_event;
 
    hdd_scan_pending_option_e scan_pending_option;
-
-#ifdef FEATURE_WLAN_SCAN_PNO
-   /* The PNO scan pending  */
-   v_BOOL_t mPnoScanPending;
-#endif
 
 }hdd_scaninfo_t;
 

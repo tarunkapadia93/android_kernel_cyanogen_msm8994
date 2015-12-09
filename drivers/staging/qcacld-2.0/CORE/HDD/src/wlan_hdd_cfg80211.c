@@ -121,6 +121,7 @@
 #define GET_IE_LEN_IN_BSS_DESC(lenInBss) ( lenInBss + sizeof(lenInBss) - \
         ((uintptr_t)OFFSET_OF( tSirBssDescription, ieFields)))
 
+#define HDD_WAKE_LOCK_SCAN_DURATION       (5 * 1000) /* in msec */
 /* For IBSS, enable obss, fromllb, overlapOBSS & overlapFromllb protection
    check. The bit map is defined in:
 
@@ -9745,16 +9746,24 @@ static void wlan_hdd_cfg80211_scan_block_cb(struct work_struct *work)
 {
     hdd_adapter_t *adapter = container_of(work,
                                    hdd_adapter_t, scan_block_work);
-    struct cfg80211_scan_request *request = adapter->request;
+    struct cfg80211_scan_request *request = NULL;
+    if (WLAN_HDD_ADAPTER_MAGIC != adapter->magic) {
+       VOS_TRACE( VOS_MODULE_ID_HDD_SAP_DATA, VOS_TRACE_LEVEL_ERROR,
+                  "%s: HDD adapter context is invalid", __func__);
+       return;
+    }
 
-    request->n_ssids = 0;
-    request->n_channels = 0;
+    request = adapter->request;
+    if (request) {
+        request->n_ssids = 0;
+        request->n_channels = 0;
 
-    hddLog(LOGE,
-            "%s:##In DFS Master mode. Scan aborted. Null result sent",
-             __func__);
-    cfg80211_scan_done(request, true);
-    adapter->request = NULL;
+        hddLog(LOGE,
+                "%s:##In DFS Master mode. Scan aborted. Null result sent",
+                 __func__);
+        cfg80211_scan_done(request, true);
+        adapter->request = NULL;
+    }
 }
 
 /*
@@ -9863,17 +9872,6 @@ int __wlan_hdd_cfg80211_scan( struct wiphy *wiphy,
         }
         return -EBUSY;
     }
-
-#ifdef FEATURE_WLAN_SCAN_PNO
-    /* This check will not allow any normal scan when we already issued
-     * an PNO scan.
-     */
-    if (TRUE == pScanInfo->mPnoScanPending)
-    {
-        hddLog(VOS_TRACE_LEVEL_ERROR, "%s: mPnoScanPending is TRUE", __func__);
-        return -EBUSY;
-    }
-#endif
 
     //Don't Allow Scan and return busy if Remain On
     //Channel and action frame is pending
@@ -10132,7 +10130,8 @@ int __wlan_hdd_cfg80211_scan( struct wiphy *wiphy,
      * 2) Connected scenario: If we allow the suspend during the scan, RIVA will
      * be stuck in full power because of resume BMPS
      */
-    hdd_prevent_suspend(WIFI_POWER_EVENT_WAKELOCK_SCAN);
+    hdd_prevent_suspend_timeout(HDD_WAKE_LOCK_SCAN_DURATION,
+                                WIFI_POWER_EVENT_WAKELOCK_SCAN);
     hddLog(VOS_TRACE_LEVEL_INFO_HIGH,
            "requestType %d, scanType %d, minChnTime %d, maxChnTime %d,p2pSearch %d, skipDfsChnlIn P2pSearch %d",
            scanRequest.requestType, scanRequest.scanType,
@@ -10234,6 +10233,12 @@ void hdd_select_cbmode( hdd_adapter_t *pAdapter,v_U8_t operationChannel)
                      hdd_cfg_xlate_to_csr_phy_mode(hddDot11Mode),
                      operationChannel);
 }
+
+/*
+ * Time in msec
+ * Time for complete association including DHCP
+ */
+#define WLAN_HDD_CONNECTION_TIME (30 * 1000)
 
 /*
  * FUNCTION: wlan_hdd_cfg80211_connect_start
@@ -10429,6 +10434,8 @@ int wlan_hdd_cfg80211_connect_start( hdd_adapter_t  *pAdapter,
             pRoamProfile->pAddIEScan = &pAdapter->scan_info.scanAddIE.addIEdata[0];
             pRoamProfile->nAddIEScanLength = pAdapter->scan_info.scanAddIE.length;
         }
+
+        vos_runtime_pm_prevent_suspend_timeout(WLAN_HDD_CONNECTION_TIME);
 
         status = sme_RoamConnect( WLAN_HDD_GET_HAL_CTX(pAdapter),
                             pAdapter->sessionId, pRoamProfile, &roamId);
@@ -13493,8 +13500,6 @@ static int __wlan_hdd_cfg80211_sched_scan_start(struct wiphy *wiphy,
         goto error;
     }
 
-    pScanInfo->mPnoScanPending = TRUE;
-
     VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
                   "PNO scanRequest offloaded");
 
@@ -13532,7 +13537,6 @@ static int __wlan_hdd_cfg80211_sched_scan_stop(struct wiphy *wiphy,
     tHalHandle hHal;
     tpSirPNOScanReq pPnoRequest = NULL;
     int ret = 0;
-    hdd_scaninfo_t *pScanInfo = &pAdapter->scan_info;
 
     ENTER();
 
@@ -13599,9 +13603,6 @@ static int __wlan_hdd_cfg80211_sched_scan_stop(struct wiphy *wiphy,
                   "Failed to disabled PNO");
         ret = -EINVAL;
     }
-
-    /* Allow normal scan to continue */
-    pScanInfo->mPnoScanPending = FALSE;
 
     VOS_TRACE( VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
                    "%s: PNO scan disabled", __func__);
@@ -15819,6 +15820,19 @@ fail:
     return;
 
 }
+
+/**
+ * wlan_hdd_cfg80211_extscan_hotlist_match_ind() - hotlist match callback
+ * @hddctx: HDD context
+ * @data: event data
+ *
+ * This function reads the hotlist matched event %data and fill in the skb with
+ * NL attributes and send up the NL event.
+ * This callback execute in atomic context and must not invoke any
+ * blocking calls.
+ *
+ * Return: none
+ */
 static void
 wlan_hdd_cfg80211_extscan_hotlist_match_ind(void *ctx,
                                             tpSirWifiScanResultEvent pData)
@@ -15826,6 +15840,7 @@ wlan_hdd_cfg80211_extscan_hotlist_match_ind(void *ctx,
     hdd_context_t *pHddCtx         = (hdd_context_t *)ctx;
     struct sk_buff *skb            = NULL;
     tANI_U32 i;
+    int flags = vos_get_gfp_flags();
 
     ENTER();
 
@@ -15838,7 +15853,7 @@ wlan_hdd_cfg80211_extscan_hotlist_match_ind(void *ctx,
     skb = cfg80211_vendor_event_alloc(pHddCtx->wiphy,
                       EXTSCAN_EVENT_BUF_SIZE + NLMSG_HDRLEN,
                       QCA_NL80211_VENDOR_SUBCMD_EXTSCAN_HOTLIST_AP_FOUND_INDEX,
-                      GFP_KERNEL);
+                      flags);
 
     if (!skb) {
         hddLog(VOS_TRACE_LEVEL_ERROR,
@@ -15925,7 +15940,7 @@ wlan_hdd_cfg80211_extscan_hotlist_match_ind(void *ctx,
             goto fail;
     }
 
-    cfg80211_vendor_event(skb, GFP_KERNEL);
+    cfg80211_vendor_event(skb, flags);
     return;
 
 fail:
@@ -15934,6 +15949,18 @@ fail:
 
 }
 
+/**
+ * wlan_hdd_cfg80211_extscan_signif_wifi_change_results_ind() - results callback
+ * @hddctx: HDD context
+ * @data: event data
+ *
+ * This function reads the event %data and fill in the skb with
+ * NL attributes and send up the NL event.
+ * This callback execute in atomic context and must not invoke any
+ * blocking calls.
+ *
+ * Return: none
+ */
 static void
 wlan_hdd_cfg80211_extscan_signif_wifi_change_results_ind(
                                           void *ctx,
@@ -15944,6 +15971,7 @@ wlan_hdd_cfg80211_extscan_signif_wifi_change_results_ind(
     tSirWifiSignificantChange *ap_info;
     tANI_S32                  *rssi;
     tANI_U32 i, j;
+    int flags = vos_get_gfp_flags();
 
     ENTER();
 
@@ -15956,7 +15984,7 @@ wlan_hdd_cfg80211_extscan_signif_wifi_change_results_ind(
     skb = cfg80211_vendor_event_alloc(pHddCtx->wiphy,
                     EXTSCAN_EVENT_BUF_SIZE + NLMSG_HDRLEN,
                     QCA_NL80211_VENDOR_SUBCMD_EXTSCAN_SIGNIFICANT_CHANGE_INDEX,
-                    GFP_KERNEL);
+                    flags);
 
     if (!skb) {
         hddLog(VOS_TRACE_LEVEL_ERROR,
@@ -16034,7 +16062,7 @@ wlan_hdd_cfg80211_extscan_signif_wifi_change_results_ind(
             goto fail;
     }
 
-    cfg80211_vendor_event(skb, GFP_KERNEL);
+    cfg80211_vendor_event(skb, flags);
     return;
 
 fail:
@@ -16043,12 +16071,25 @@ fail:
 
 }
 
+/**
+ * wlan_hdd_cfg80211_extscan_full_scan_result_event() - full scan results event
+ * @hddctx: HDD context
+ * @data: event data
+ *
+ * This function reads the event %data and fill in the skb with
+ * NL attributes and send up the NL event.
+ * This callback execute in atomic context and must not invoke any
+ * blocking calls.
+ *
+ * Return: none
+ */
 static void
 wlan_hdd_cfg80211_extscan_full_scan_result_event(void *ctx,
                                              tpSirWifiFullScanResultEvent pData)
 {
     hdd_context_t *pHddCtx  = (hdd_context_t *)ctx;
     struct sk_buff *skb     = NULL;
+    int flags = vos_get_gfp_flags();
 
     ENTER();
 
@@ -16069,7 +16110,7 @@ wlan_hdd_cfg80211_extscan_full_scan_result_event(void *ctx,
     skb = cfg80211_vendor_event_alloc(pHddCtx->wiphy,
                   EXTSCAN_EVENT_BUF_SIZE + NLMSG_HDRLEN,
                   QCA_NL80211_VENDOR_SUBCMD_EXTSCAN_FULL_SCAN_RESULT_INDEX,
-                  GFP_KERNEL);
+                  flags);
 
     if (!skb) {
         hddLog(LOGE, FL("cfg80211_vendor_event_alloc failed"));
@@ -16145,7 +16186,7 @@ wlan_hdd_cfg80211_extscan_full_scan_result_event(void *ctx,
             goto nla_put_failure;
     }
 
-    cfg80211_vendor_event(skb, GFP_KERNEL);
+    cfg80211_vendor_event(skb, flags);
     return;
 
 nla_put_failure:
@@ -16153,12 +16194,25 @@ nla_put_failure:
     return;
 }
 
+/**
+ * wlan_hdd_cfg80211_extscan_scan_res_available_event() - scan available event
+ * @hddctx: HDD context
+ * @data: event data
+ *
+ * This function reads the event %data and fill in the skb with
+ * NL attributes and send up the NL event.
+ * This callback execute in atomic context and must not invoke any
+ * blocking calls.
+ *
+ * Return: none
+ */
 static void
 wlan_hdd_cfg80211_extscan_scan_res_available_event(void *ctx,
                                     tpSirExtScanResultsAvailableIndParams pData)
 {
     hdd_context_t *pHddCtx  = (hdd_context_t *)ctx;
     struct sk_buff *skb     = NULL;
+    int flags = vos_get_gfp_flags();
 
     ENTER();
 
@@ -16171,7 +16225,7 @@ wlan_hdd_cfg80211_extscan_scan_res_available_event(void *ctx,
     skb = cfg80211_vendor_event_alloc(pHddCtx->wiphy,
                 EXTSCAN_EVENT_BUF_SIZE + NLMSG_HDRLEN,
                 QCA_NL80211_VENDOR_SUBCMD_EXTSCAN_SCAN_RESULTS_AVAILABLE_INDEX,
-                GFP_KERNEL);
+                flags);
 
     if (!skb) {
         hddLog(VOS_TRACE_LEVEL_ERROR,
@@ -16191,7 +16245,7 @@ wlan_hdd_cfg80211_extscan_scan_res_available_event(void *ctx,
         goto nla_put_failure;
     }
 
-    cfg80211_vendor_event(skb, GFP_KERNEL);
+    cfg80211_vendor_event(skb, flags);
     return;
 
 nla_put_failure:
@@ -16199,12 +16253,25 @@ nla_put_failure:
     return;
 }
 
+/**
+ * wlan_hdd_cfg80211_extscan_scan_progress_event() - scan progress event
+ * @hddctx: HDD context
+ * @data: event data
+ *
+ * This function reads the event %data and fill in the skb with
+ * NL attributes and send up the NL event.
+ * This callback execute in atomic context and must not invoke any
+ * blocking calls.
+ *
+ * Return: none
+ */
 static void
 wlan_hdd_cfg80211_extscan_scan_progress_event(void *ctx,
                                          tpSirExtScanOnScanEventIndParams pData)
 {
     hdd_context_t *pHddCtx  = (hdd_context_t *)ctx;
     struct sk_buff *skb     = NULL;
+    int flags = vos_get_gfp_flags();
 
     ENTER();
 
@@ -16217,7 +16284,7 @@ wlan_hdd_cfg80211_extscan_scan_progress_event(void *ctx,
     skb = cfg80211_vendor_event_alloc(pHddCtx->wiphy,
                             EXTSCAN_EVENT_BUF_SIZE + NLMSG_HDRLEN,
                             QCA_NL80211_VENDOR_SUBCMD_EXTSCAN_SCAN_EVENT_INDEX,
-                            GFP_KERNEL);
+                            flags);
 
     if (!skb) {
         hddLog(VOS_TRACE_LEVEL_ERROR,
@@ -16239,7 +16306,7 @@ wlan_hdd_cfg80211_extscan_scan_progress_event(void *ctx,
         goto nla_put_failure;
     }
 
-    cfg80211_vendor_event(skb, GFP_KERNEL);
+    cfg80211_vendor_event(skb, flags);
     return;
 
 nla_put_failure:

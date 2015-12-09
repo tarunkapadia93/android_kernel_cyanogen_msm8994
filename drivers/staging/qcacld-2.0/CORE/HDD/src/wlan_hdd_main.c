@@ -9937,7 +9937,10 @@ VOS_STATUS hdd_start_all_adapters( hdd_context_t *pHddCtx )
 
             //Indicate disconnect event to supplicant if associated previously
             if (eConnectionState_Associated == connState ||
-                eConnectionState_IbssConnected == connState )
+                eConnectionState_IbssConnected == connState ||
+                eConnectionState_NotConnected == connState ||
+                eConnectionState_IbssDisconnected == connState ||
+                eConnectionState_Disconnecting == connState)
             {
                union iwreq_data wrqu;
                memset(&wrqu, '\0', sizeof(wrqu));
@@ -10620,6 +10623,17 @@ static void hdd_set_multicast_list(struct net_device *dev)
    int mc_count;
    int i = 0;
    struct netdev_hw_addr *ha;
+   hdd_context_t *pHddCtx;
+
+   pHddCtx = WLAN_HDD_GET_CTX(pAdapter);
+   if (0 != wlan_hdd_validate_context(pHddCtx))
+      return;
+
+   if (VOS_FTM_MODE == hdd_get_conparam())
+      return;
+
+   /* Delete already configured multicast address list */
+   wlan_hdd_set_mc_addr_list(pAdapter, false);
 
    if (dev->flags & IFF_ALLMULTI)
    {
@@ -10653,6 +10667,10 @@ static void hdd_set_multicast_list(struct net_device *dev)
          i++;
       }
    }
+
+   /* Configure the updated multicast address list */
+   wlan_hdd_set_mc_addr_list(pAdapter, true);
+
    return;
 }
 #endif
@@ -12098,6 +12116,15 @@ int hdd_wlan_startup(struct device *dev, v_VOID_t *hif_sc)
    {
       hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Failed hdd_set_sme_config", __func__);
       goto err_wiphy_unregister;
+   }
+
+   ret = process_wma_set_command(0, WMI_PDEV_PARAM_TX_CHAIN_MASK_1SS,
+                                 pHddCtx->cfg_ini->tx_chain_mask_1ss,
+                                 PDEV_CMD);
+   if (0 != ret) {
+       hddLog(VOS_TRACE_LEVEL_ERROR,
+              "%s: WMI_PDEV_PARAM_TX_CHAIN_MASK_1SS failed %d",
+              __func__, ret);
    }
 
    status = hdd_set_sme_chan_list(pHddCtx);
