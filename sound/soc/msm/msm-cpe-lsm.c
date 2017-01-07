@@ -406,7 +406,7 @@ static int msm_cpe_lab_thread(void *data)
 				next_buf = &lab->pcm_buf[buf_count + 1];
 				buf_count++;
 			}
-			pr_debug("%s: Cur buf = %p Next Buf = %p\n"
+			pr_debug("%s: Cur buf = %pK Next Buf = %pK\n"
 				 " buf count = 0x%x\n",
 				 __func__, cur_buf, next_buf, buf_count);
 		} else {
@@ -822,6 +822,7 @@ static int msm_cpe_lsm_ioctl_shared(struct snd_pcm_substream *substream,
 			dev_err(rtd->dev, "%s: No memory for sound model\n",
 				__func__);
 			kfree(session->conf_levels);
+			session->conf_levels = NULL;
 			return -ENOMEM;
 		}
 		session->snd_model_size = snd_model.data_size;
@@ -833,6 +834,8 @@ static int msm_cpe_lsm_ioctl_shared(struct snd_pcm_substream *substream,
 				__func__);
 			kfree(session->conf_levels);
 			kfree(session->snd_model_data);
+			session->conf_levels = NULL;
+			session->snd_model_data = NULL;
 			return -EFAULT;
 		}
 
@@ -844,6 +847,8 @@ static int msm_cpe_lsm_ioctl_shared(struct snd_pcm_substream *substream,
 			       __func__, rc);
 			kfree(session->snd_model_data);
 			kfree(session->conf_levels);
+			session->snd_model_data = NULL;
+			session->conf_levels = NULL;
 			return rc;
 		}
 
@@ -857,6 +862,8 @@ static int msm_cpe_lsm_ioctl_shared(struct snd_pcm_substream *substream,
 			lsm_ops->lsm_shmem_dealloc(cpe->core_handle, session);
 			kfree(session->snd_model_data);
 			kfree(session->conf_levels);
+			session->snd_model_data = NULL;
+			session->conf_levels = NULL;
 			return rc;
 		}
 
@@ -1092,7 +1099,7 @@ static int msm_cpe_lsm_lab_start(struct snd_pcm_substream *substream,
 	struct wcd_cpe_lsm_ops *lsm_ops;
 
 	if (!substream || !substream->private_data) {
-		pr_err("%s: invalid substream (%p)\n",
+		pr_err("%s: invalid substream (%pK)\n",
 			__func__, substream);
 		return -EINVAL;
 	}
@@ -1166,7 +1173,7 @@ static int msm_cpe_lsm_ioctl(struct snd_pcm_substream *substream,
 	struct wcd_cpe_lsm_ops *lsm_ops;
 
 	if (!substream || !substream->private_data) {
-		pr_err("%s: invalid substream (%p)\n",
+		pr_err("%s: invalid substream (%pK)\n",
 			__func__, substream);
 		return -EINVAL;
 	}
@@ -1341,7 +1348,7 @@ static int msm_cpe_lsm_ioctl_compat(struct snd_pcm_substream *substream,
 	struct wcd_cpe_lsm_ops *lsm_ops;
 
 	if (!substream || !substream->private_data) {
-		pr_err("%s: invalid substream (%p)\n",
+		pr_err("%s: invalid substream (%pK)\n",
 			__func__, substream);
 		return -EINVAL;
 	}
@@ -1783,7 +1790,7 @@ static int msm_cpe_lsm_copy(struct snd_pcm_substream *substream, int a,
 	if (lab_s->buf_idx >= (lab_s->hw_params.period_count))
 		lab_s->buf_idx = 0;
 	pcm_buf = (lab_s->pcm_buf[lab_s->buf_idx].mem);
-	pr_debug("%s: Buf IDX = 0x%x pcm_buf %pa\n",
+	pr_debug("%s: Buf IDX = 0x%x pcm_buf %pK\n",
 			__func__,
 			lab_s->buf_idx,
 			&(lab_s->pcm_buf[lab_s->buf_idx]));
